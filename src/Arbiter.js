@@ -3,7 +3,7 @@ import { db } from "./firebase";
 
 const ROWS = 8;
 const COLS = 9;
-const GAME_ID = "main_battle_room"; // Changed ID to force a fresh data node
+const GAME_ID = "battle_arena_v1"; 
 
 export const PIECES = [
   { rank: "5★ General", value: 14 }, { rank: "4★ General", value: 13 },
@@ -27,6 +27,7 @@ class Arbiter {
   }
 
   initLocal() {
+    // Force a 2D Array structure
     this.board = Array(ROWS).fill(null).map(() => Array(COLS).fill(null));
     this.turn = 1;
     this.playerReady = { 1: false, 2: false };
@@ -40,16 +41,16 @@ class Arbiter {
   sync() {
     onValue(this.gameRef, (snapshot) => {
       const data = snapshot.val();
-      if (!data) {
-        this.save(); // Initialize cloud if empty
-        return;
-      }
+      if (!data) return this.save();
 
-      // CRITICAL FIX: Convert Firebase objects back into Arrays
-      if (data.board && !Array.isArray(data.board)) {
-        data.board = Object.values(data.board).map(row => 
-          Array.isArray(row) ? row : Object.values(row)
-        );
+      // HEALING LOGIC: If Firebase flattens the board, reconstruct the 8x9 grid
+      if (data.board) {
+        let flat = Object.values(data.board).flatMap(row => Object.values(row));
+        let restored = [];
+        for (let i = 0; i < ROWS; i++) {
+          restored.push(flat.slice(i * COLS, (i + 1) * COLS));
+        }
+        data.board = restored;
       }
       
       Object.assign(this, data);
@@ -70,19 +71,28 @@ class Arbiter {
   }
 
   async autoDeploy(p) {
+    // Official Rules: P1 starts at bottom (Rows 5,6,7), P2 starts at top (Rows 0,1,2)
     const isMyZone = (r) => (p === 1 ? r >= 5 : r <= 2);
+    
+    // Clear only my zone
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        if (isMyZone(r)) this.board[r][c] = null;
+      }
+    }
+
     const spots = [];
     for (let r = 0; r < ROWS; r++) {
       for (let c = 0; c < COLS; c++) {
-        if (isMyZone(r)) {
-          this.board[r][c] = null; // Clear first
-          spots.push({ r, c });
-        }
+        if (isMyZone(r)) spots.push({ r, c });
       }
     }
+
     spots.sort(() => Math.random() - 0.5);
     PIECES.forEach((piece, i) => {
-      if (spots[i]) this.board[spots[i].r][spots[i].c] = { ...piece, player: p };
+      if (spots[i]) {
+        this.board[spots[i].r][spots[i].c] = { ...piece, player: p };
+      }
     });
     await this.save();
   }
@@ -91,6 +101,10 @@ class Arbiter {
     if (this.turn !== p || this.gameOver) return;
     const att = this.board[from.r][from.c];
     const def = this.board[to.r][to.c];
+
+    // Only 1 square cardinal moves
+    const dist = Math.abs(from.r - to.r) + Math.abs(from.c - to.c);
+    if (dist !== 1) return;
 
     if (!def) {
       this.board[to.r][to.c] = att;
@@ -110,7 +124,6 @@ class Arbiter {
         this.gameOver = true;
         this.winner = p;
       }
-      this.lastBattle = { msg: `Battle: ${att.rank} vs ${def.rank}`, time: Date.now() };
     }
     this.turn = this.turn === 1 ? 2 : 1;
     this.lastTurnTime = Date.now();
@@ -120,9 +133,12 @@ class Arbiter {
   resolve(att, def) {
     if (def.rank === "Flag") return "flag";
     if (att.rank === def.rank) return "draw";
+    // Spy kills everyone except Private
     if (att.rank === "Spy" && def.rank !== "Private") return "win";
     if (def.rank === "Spy" && att.rank !== "Private") return "loss";
+    // Private kills Spy
     if (att.rank === "Private" && def.rank === "Spy") return "win";
+    if (def.rank === "Private" && att.rank === "Spy") return "loss";
     return att.value > def.value ? "win" : "loss";
   }
 
