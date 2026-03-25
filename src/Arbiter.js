@@ -35,13 +35,11 @@ class Arbiter {
     this.activePlayers = { 1: false, 2: false };
     this.lastSeen = { 1: 0, 2: 0 };
     this.lastActivity = Date.now(); 
-    this.gameStartTime = null; 
-    this.lastTurnTime = null;  
+    this.lastTurnTime = Date.now();  
     this.lastBattle = null; 
     this.battleLog = []; 
     this.gameOver = false;
     this.winner = null;
-    this.valorMedal = null;
     this.listeners = [];
   }
 
@@ -56,28 +54,50 @@ class Arbiter {
   }
 
   async save() {
-    this.lastActivity = Date.now(); 
     const state = {
       board: this.board, turn: this.turn, graveyard: this.graveyard,
       playerReady: this.playerReady, playerNames: this.playerNames,
       activePlayers: this.activePlayers, lastSeen: this.lastSeen,
-      lastActivity: this.lastActivity, gameStartTime: this.gameStartTime,
-      lastTurnTime: this.lastTurnTime, lastBattle: this.lastBattle, 
-      battleLog: this.battleLog, gameOver: this.gameOver, 
-      winner: this.winner, valorMedal: this.valorMedal
+      lastActivity: Date.now(), lastTurnTime: this.lastTurnTime,
+      lastBattle: this.lastBattle, battleLog: this.battleLog, 
+      gameOver: this.gameOver, winner: this.winner
     };
     await set(this.gameRef, state);
   }
 
-  reset() {
-    set(ref(db, `reset_trigger/${GAME_ID}`), Date.now());
-    this.initLocal();
-    this.save();
+  updatePresence(p) {
+    set(ref(db, `games/${GAME_ID}/lastSeen/${p}`), Date.now());
   }
 
-  updatePresence(p) {
-    this.lastSeen[p] = Date.now();
-    set(ref(db, `games/${GAME_ID}/lastSeen/${p}`), this.lastSeen[p]);
+  // Auto-deploy pieces into the player's 3 rows
+  async autoDeploy(player) {
+    this.clearPlayerBoard(player);
+    const isZone = (r) => (player === 1 ? r >= 5 : r <= 2);
+    const spots = [];
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        if (isZone(r)) spots.push({ r, c });
+      }
+    }
+    spots.sort(() => Math.random() - 0.5);
+    PIECES.forEach((p, i) => {
+      if (spots[i]) this.board[spots[i].r][spots[i].c] = { ...p, player };
+    });
+    await this.save();
+  }
+
+  async clearPlayerBoard(player) {
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        if (this.board[r][c]?.player === player) this.board[r][c] = null;
+      }
+    }
+    await this.save();
+  }
+
+  async setPiece(r, c, piece, player) {
+    this.board[r][c] = piece ? { ...piece, player } : null;
+    await this.save();
   }
 
   async movePiece(from, to, player) {
@@ -85,10 +105,10 @@ class Arbiter {
     const attacker = this.board[from.r][from.c];
     const defender = this.board[to.r][to.c];
     
-    // Cardinal check (1 square)
+    // Cardinal move check
     if (Math.abs(from.r - to.r) + Math.abs(from.c - to.c) !== 1) {
-      this.lastBattle = { msg: "Illegal Move!", time: Date.now(), isWarning: true, targetPlayer: player };
-      this.save();
+      this.lastBattle = { msg: "Illegal maneuver! Cardinal moves only.", time: Date.now(), isWarning: true, targetPlayer: player };
+      await this.save();
       return;
     }
 
@@ -137,6 +157,12 @@ class Arbiter {
       if (!cell) return null;
       return (cell.player === p || this.gameOver) ? cell : { ...cell, rank: "?" };
     }));
+  }
+
+  async reset() {
+    set(ref(db, `reset_trigger/${GAME_ID}`), Date.now());
+    this.initLocal();
+    await this.save();
   }
 
   subscribe(f) { this.listeners.push(f); }

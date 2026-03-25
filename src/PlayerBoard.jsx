@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { arbiter, PIECES } from "./Arbiter";
+import { ref, onValue } from "firebase/database";
+import { db } from "./firebase";
 
 export default function PlayerBoard({ player }) {
   const [board, setBoard] = useState(arbiter.getBoardForPlayer(player));
@@ -9,7 +11,6 @@ export default function PlayerBoard({ player }) {
   const [battleFlash, setBattleFlash] = useState(null);
   const [timeLeft, setTimeLeft] = useState(60);
 
-  // Calculates which pieces are still in your tray (not yet on the board)
   const calculateTray = useCallback(() => {
     const remaining = [...PIECES];
     arbiter.board.flat().forEach(cell => {
@@ -23,53 +24,58 @@ export default function PlayerBoard({ player }) {
 
   const [tray, setTray] = useState(calculateTray());
 
+  const updateUI = useCallback(() => {
+    setBoard(arbiter.getBoardForPlayer(player));
+    setTray(calculateTray());
+    
+    if (arbiter.playerReady[1] && arbiter.playerReady[2]) {
+      setPhase("play");
+      const elapsed = Math.floor((Date.now() - (arbiter.lastTurnTime || Date.now())) / 1000);
+      setTimeLeft(Math.max(0, 60 - elapsed));
+    } else {
+      setPhase("setup");
+    }
+
+    if (arbiter.lastBattle && (!battleFlash || arbiter.lastBattle.time !== battleFlash.time)) {
+      setBattleFlash(arbiter.lastBattle);
+      setTimeout(() => setBattleFlash(null), 4000);
+    }
+  }, [player, battleFlash, calculateTray]);
+
   useEffect(() => {
-    const update = () => {
-      arbiter.load(); // Pull fresh data from Firebase via the Arbiter
-      setBoard(arbiter.getBoardForPlayer(player));
-      setTray(calculateTray());
+    arbiter.subscribe(updateUI);
+    
+    // Global Reset Listener
+    const resetRef = ref(db, `reset_trigger/main_room`);
+    onValue(resetRef, () => {
+       if (window.location.search.includes("p=")) {
+         window.location.href = window.location.origin + window.location.pathname;
+       }
+    });
 
-      // Phase Logic: If both players are ready, move to play phase
-      if (arbiter.playerReady[1] && arbiter.playerReady[2]) {
-        setPhase("play");
-        const elapsed = Math.floor((Date.now() - arbiter.lastTurnTime) / 1000);
-        setTimeLeft(Math.max(0, 60 - elapsed));
-      } else {
-        setPhase("setup");
-      }
-
-      if (arbiter.lastBattle && (!battleFlash || arbiter.lastBattle.time !== battleFlash.time)) {
-        setBattleFlash(arbiter.lastBattle);
-        setTimeout(() => setBattleFlash(null), 4000);
-      }
-    };
-
-    arbiter.subscribe(update);
     const timer = setInterval(() => {
       arbiter.updatePresence(player);
-      update();
+      updateUI();
     }, 1000);
 
-    return () => { arbiter.unsubscribe(update); clearInterval(timer); };
-  }, [player, battleFlash, calculateTray]);
+    return () => { arbiter.unsubscribe(updateUI); clearInterval(timer); };
+  }, [player, updateUI]);
 
   const handleCellClick = (r, c) => {
     if (arbiter.gameOver) return;
     const isMyZone = player === 1 ? r >= 5 : r <= 2;
 
     if (phase === "setup" && !arbiter.playerReady[player]) {
-      if (!isMyZone) return; // Can only place in your 3 rows
-      const cell = arbiter.board[r][c];
-      
-      if (cell?.player === player) {
-        arbiter.setPiece(r, c, null, player); // Remove piece
-      } else if (selectedTrayPiece) {
-        arbiter.setPiece(r, c, selectedTrayPiece, player); // Place piece
+      if (!isMyZone) return;
+      if (selectedTrayPiece) {
+        arbiter.setPiece(r, c, selectedTrayPiece, player);
         setSelectedTrayPiece(null);
+      } else if (arbiter.board[r][c]?.player === player) {
+        arbiter.setPiece(r, c, null, player);
       }
     } else if (phase === "play" && arbiter.turn === player) {
       if (!selectedBoardSquare) {
-        if (board[r][c]?.player === player) setSelectedBoardSquare({ r, c });
+        if (arbiter.board[r][c]?.player === player) setSelectedBoardSquare({ r, c });
       } else {
         arbiter.movePiece(selectedBoardSquare, { r, c }, player);
         setSelectedBoardSquare(null);
@@ -77,50 +83,50 @@ export default function PlayerBoard({ player }) {
     }
   };
 
+  const getFlashContent = () => {
+    if (!battleFlash) return null;
+    if (battleFlash.isWarning) return battleFlash.targetPlayer === player ? { msg: battleFlash.msg, color: "#1a2a3a" } : null;
+    const { attackerRank, attackerPlayer, defenderRank, defenderPlayer, result } = battleFlash;
+    const amAttacker = attackerPlayer === player;
+    
+    if (result === "attacker") {
+      return amAttacker ? { msg: `SUCCESS! Your ${attackerRank} captured a unit.`, color: "#004d00" } : { msg: "DEFEAT! Your unit was captured.", color: "#800000" };
+    }
+    if (result === "defender") {
+      return amAttacker ? { msg: `DEFEAT! Your ${attackerRank} was lost.`, color: "#800000" } : { msg: "SUCCESS! You defended the square.", color: "#004d00" };
+    }
+    return { msg: "A DRAW! Both units lost.", color: "gold" };
+  };
+
   return (
     <div style={{ display: "flex", gap: "20px", padding: "20px", background: "#0a0a0a", minHeight: "100vh", color: "white", fontFamily: "sans-serif" }}>
       
-      {/* LEFT SIDEBAR: Instructions, Timer, Graveyard */}
+      {/* SIDEBAR */}
       <div style={{ width: "280px", background: "#111", padding: "20px", borderRadius: "10px", border: "1px solid #222", display: "flex", flexDirection: "column" }}>
-        <div style={{ borderBottom: "1px solid #333", paddingBottom: "15px", marginBottom: "15px" }}>
-          <h4 style={{ color: "gold", margin: "0 0 10px 0", fontSize: "12px", textAlign: "center" }}>BATTLE PROCEDURES</h4>
-          <ul style={{ fontSize: "11px", color: "#aaa", paddingLeft: "15px", lineHeight: "1.6" }}>
-            <li><b>Movement:</b> One square (Up, Down, L, R).</li>
-            <li><b>Spy:</b> Kills officers, loses to <b>Private</b>.</li>
-            <li><b>Victory:</b> Take Flag or reach back row.</li>
-          </ul>
-        </div>
-
+        <h4 style={{ color: "gold", fontSize: "12px", textAlign: "center", marginBottom: "15px" }}>BATTLE PROCEDURES</h4>
         <div style={{ background: "#050505", border: "1px solid #333", borderRadius: "10px", padding: "20px", textAlign: "center", marginBottom: "20px" }}>
-          <div style={{ fontSize: "32px", fontWeight: "bold", color: "#fff" }}>{arbiter.gameOver ? "FIN" : timeLeft + "s"}</div>
-          <div style={{ fontSize: "10px", color: "gold", marginTop: "5px" }}>{arbiter.turn === player ? "YOUR TURN" : "OPPONENT'S TURN"}</div>
+          <div style={{ fontSize: "32px", fontWeight: "bold" }}>{arbiter.gameOver ? "FIN" : timeLeft + "s"}</div>
+          <div style={{ fontSize: "10px", color: "gold" }}>{arbiter.turn === player ? "YOUR TURN" : "WAITING"}</div>
         </div>
 
-        <div style={{ textAlign: "center", marginBottom: "20px" }}>
-          <div style={{ fontSize: "14px", fontWeight: "bold" }}>{arbiter.playerNames[player]}</div>
-          <div style={{ fontSize: "10px", color: "#555" }}>● ONLINE</div>
-        </div>
-
-        <div style={{ flexGrow: 1 }}>
-          <h5 style={{ color: "#ff4d4d", fontSize: "10px", margin: "0 0 10px 0" }}>GRAVEYARD: DEFEATED</h5>
-          <h5 style={{ color: "#4CAF50", fontSize: "10px", margin: "20px 0 10px 0" }}>GRAVEYARD: CAPTURES</h5>
+        <div style={{ flexGrow: 1, fontSize: "11px", color: "#666" }}>
+          <p>● {arbiter.playerNames[player].toUpperCase()}</p>
+          <p style={{ color: "#ff4d4d", marginTop: "20px" }}>GRAVEYARD: DEFEATED</p>
+          <p style={{ color: "#4CAF50" }}>GRAVEYARD: CAPTURES</p>
         </div>
 
         <div style={{ borderTop: "1px solid #333", paddingTop: "15px", fontSize: "10px", color: "#444", textAlign: "center" }}>
           Lead Prompt Engineer: <b>Emelizaducos</b><br/>AI Architect: <b>Gemini 3.0 Flash</b>
         </div>
-        
-        <button onClick={() => arbiter.reset()} style={{ width: "100%", padding: "12px", background: "#d9534f", border: "none", color: "white", borderRadius: "5px", fontWeight: "bold", marginTop: "15px", cursor: "pointer" }}>RESET ALL</button>
+        <button onClick={() => arbiter.reset()} style={{ width: "100%", padding: "12px", background: "#d9534f", border: "none", color: "white", fontWeight: "bold", borderRadius: "5px", cursor: "pointer", marginTop: "10px" }}>RESET ALL</button>
       </div>
 
-      {/* MAIN CENTER: Board and Setup Controls */}
+      {/* CENTER */}
       <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center" }}>
-        
         <div style={{ height: "60px", marginBottom: "10px" }}>
-          {battleFlash && <div style={{ background: "#1a2a3a", padding: "10px 30px", borderRadius: "5px", border: "1px solid #333" }}>{battleFlash.msg}</div>}
+          {getFlashContent() && <div style={{ background: getFlashContent().color, padding: "10px 30px", borderRadius: "5px" }}>{getFlashContent().msg}</div>}
         </div>
 
-        {/* THE BOARD */}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(9, 68px)", gap: "6px", background: "#151515", padding: "15px", borderRadius: "12px", border: "1px solid #222" }}>
           {board.map((row, r) => row.map((cell, c) => (
             <div key={`${r}-${c}`} onClick={() => handleCellClick(r, c)} 
@@ -136,12 +142,10 @@ export default function PlayerBoard({ player }) {
           )))}
         </div>
 
-        {/* BATTLE LOG */}
-        <div style={{ width: "100%", maxWidth: "660px", background: "#050505", border: "1px solid #222", padding: "10px", marginTop: "15px", borderRadius: "5px", height: "40px", textAlign: "center", color: "#444", fontSize: "11px" }}>
+        <div style={{ width: "100%", maxWidth: "660px", background: "#050505", border: "1px solid #222", padding: "10px", marginTop: "15px", borderRadius: "5px", textAlign: "center", color: "#444", fontSize: "11px" }}>
           BATTLE LOG
         </div>
 
-        {/* SETUP CONTROLS (Your Image Reference) */}
         {phase === "setup" && !arbiter.playerReady[player] && (
           <div style={{ marginTop: "20px", width: "100%", maxWidth: "660px" }}>
             <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", justifyContent: "center", background: "#111", padding: "15px", borderRadius: "10px", border: "1px solid #222" }}>
@@ -152,7 +156,6 @@ export default function PlayerBoard({ player }) {
                 </div>
               ))}
             </div>
-
             <div style={{ display: "flex", gap: "15px", justifyContent: "center", marginTop: "15px" }}>
               <button onClick={() => arbiter.autoDeploy(player)} style={{ padding: "10px 25px", background: "#fff", color: "#000", border: "none", fontWeight: "bold", borderRadius: "4px", cursor: "pointer" }}>AUTO-DEPLOY</button>
               <button onClick={() => arbiter.clearPlayerBoard(player)} style={{ padding: "10px 25px", background: "#fff", color: "#000", border: "none", fontWeight: "bold", borderRadius: "4px", cursor: "pointer" }}>CLEAR</button>
