@@ -47,7 +47,19 @@ class Arbiter {
     onValue(this.gameRef, (snapshot) => {
       const data = snapshot.val();
       if (data) {
+        // FIX: Force board back into a proper Array if Firebase turned it into an Object
+        if (data.board && !Array.isArray(data.board)) {
+          data.board = Object.values(data.board).map(row => 
+            Array.isArray(row) ? row : Object.values(row)
+          );
+        }
+        
         Object.assign(this, data);
+
+        // Final safety check
+        if (!this.board || !Array.isArray(this.board)) {
+          this.board = Array(ROWS).fill(null).map(() => Array(COLS).fill(null));
+        }
         this.notify();
       }
     });
@@ -69,9 +81,8 @@ class Arbiter {
     set(ref(db, `games/${GAME_ID}/lastSeen/${p}`), Date.now());
   }
 
-  // Auto-deploy pieces into the player's 3 rows
   async autoDeploy(player) {
-    this.clearPlayerBoard(player);
+    await this.clearPlayerBoard(player);
     const isZone = (r) => (player === 1 ? r >= 5 : r <= 2);
     const spots = [];
     for (let r = 0; r < ROWS; r++) {
@@ -105,7 +116,6 @@ class Arbiter {
     const attacker = this.board[from.r][from.c];
     const defender = this.board[to.r][to.c];
     
-    // Cardinal move check
     if (Math.abs(from.r - to.r) + Math.abs(from.c - to.c) !== 1) {
       this.lastBattle = { msg: "Illegal maneuver! Cardinal moves only.", time: Date.now(), isWarning: true, targetPlayer: player };
       await this.save();
@@ -124,15 +134,12 @@ class Arbiter {
         this.graveyard[defender.player].push(defender);
         this.board[to.r][to.c] = attacker;
         this.board[from.r][from.c] = null;
-        this.battleLog.unshift(`${this.playerNames[player]} won a challenge.`);
       } else if (result === "defender") {
         this.graveyard[attacker.player].push(attacker);
         this.board[from.r][from.c] = null;
-        this.battleLog.unshift(`${this.playerNames[defender.player]} won a challenge.`);
       } else if (result === "both") {
         this.graveyard[1].push(attacker); this.graveyard[2].push(defender);
         this.board[from.r][from.c] = null; this.board[to.r][to.c] = null;
-        this.battleLog.unshift(`A double loss occurred.`);
       } else if (result === "gameover") {
         this.gameOver = true; this.winner = player;
       }
@@ -153,18 +160,19 @@ class Arbiter {
   }
 
   getBoardForPlayer(p) {
-    return this.board.map(row => row.map(cell => {
+    if (!this.board || !Array.isArray(this.board)) return [];
+    return this.board.map(row => (row || []).map(cell => {
       if (!cell) return null;
       return (cell.player === p || this.gameOver) ? cell : { ...cell, rank: "?" };
     }));
   }
 
   async reset() {
-    set(ref(db, `reset_trigger/${GAME_ID}`), Date.now());
     this.initLocal();
     await this.save();
   }
 
+  load() { return; } // Dummy to satisfy legacy calls
   subscribe(f) { this.listeners.push(f); }
   unsubscribe(f) { this.listeners = this.listeners.filter(l => l !== f); }
   notify() { this.listeners.forEach(f => f()); }
